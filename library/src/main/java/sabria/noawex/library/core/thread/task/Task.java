@@ -223,7 +223,7 @@ public abstract class Task<Result,Progress> {
 
     protected abstract Result run() throws InterruptedException;
 
-    final void softCancel(){
+    public final void softCancel(){
         try {
             lock.lock();
             Utils.checkInitialized(mCurrentState);
@@ -253,6 +253,7 @@ public abstract class Task<Result,Progress> {
      */
     protected void onReset() {
     }
+
 
     @Override
     public String toString() {

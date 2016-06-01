@@ -41,6 +41,7 @@ public class NoAwex {
     private final Map<Integer,Map<Integer,Worker>> mWorkers;
     private final PoolPolicy mPoolPolicy;
     private final AtomicInteger mThreadIdProvider = new AtomicInteger();
+    //在promise使用的callback
     private final ExecutorService mCallbackExecutor = Executors.newSingleThreadExecutor();
     private Timer mTimer;
     private final Map<Task,Task> mTasks = Map.Provider.getSync();
@@ -97,7 +98,7 @@ public class NoAwex {
     private void extractWorkersInfo(QueueStateImpl queueState) {
         ArrayMap<Integer, Worker> workers = mWorkers.get(queueState.getId()).clone();
         for(Worker worker : workers.values()){
-            queueState.addWorker(worker.getId(),worker.takeState());
+            queueState.addWorker(worker.getId(), worker.takeState());
         }
     }
 
@@ -122,13 +123,36 @@ public class NoAwex {
 
     public <Result,Progress> void onTaskExecutionTimeout(Task<Result,Progress> task) {
         PoolStateImpl poolState = extractPoolState();
-        mPoolPolicy.onTaskExecutionTimeout(poolState,task);
+        mPoolPolicy.onTaskExecutionTimeout(poolState, task);
         poolState.recycle();
     }
 
     public void schedule(TimerTask timerTask, int timeout) {
         if(timeout >0){
             mTimer.schedule(timerTask,timeout);
+        }
+    }
+
+    /**
+     * 供cancelTask使用
+     * @param task
+     * @param mayInterrupt
+     * @param <Result>
+     * @param <Progress>
+     */
+    public <Result, Progress> void cancel(Task<Result, Progress> task, boolean mayInterrupt) {
+        synchronized (this) {
+            task.softCancel();
+            TaskQueue taskQueue = task.getTaskQueue();
+            if (taskQueue != null) {
+                if (!taskQueue.remove(task) && mayInterrupt) {
+                    Worker worker = task.getWorker();
+                    if (worker != null) {
+                        worker.interrupt();
+                        mWorkers.get(taskQueue.getId()).remove(worker.getId());
+                    }
+                }
+            }
         }
     }
 

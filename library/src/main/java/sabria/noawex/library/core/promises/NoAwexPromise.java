@@ -16,7 +16,9 @@ import sabria.noawex.library.callback.background.DoneCallback;
 import sabria.noawex.library.callback.background.FailCallback;
 import sabria.noawex.library.callback.background.ProgressCallback;
 import sabria.noawex.library.callback.ui.UIAlwaysCallback;
+import sabria.noawex.library.callback.ui.UICancelCallback;
 import sabria.noawex.library.callback.ui.UIDoneCallback;
+import sabria.noawex.library.callback.ui.UIFailCallback;
 import sabria.noawex.library.core.thread.ThreadHelper;
 import sabria.noawex.library.core.thread.task.Task;
 import sabria.noawex.library.util.Logger;
@@ -64,6 +66,145 @@ public class NoAwexPromise<Result, Progress> implements ResolvablePromise<Result
         Utils.printStateChanged(mLogger, mId, "PENDING");
     }
 
+    @Override
+    public Promise<Result, Progress> done(final DoneCallback<Result> callback) {
+        Log.e("State5", "" + getState());
+        State state;
+        synchronized (this) {
+            state = mState;
+            if (state == State.STATE_PENDING) {
+                mCallbacks.mDoneCallbacks.add(callback);
+            }
+        }
+        if (state == State.STATE_RESOLVED) {
+            if (shouldExecuteInBackground(callback)) {
+                mNoAwex.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        tryTrigger(callback,mResult);
+                    }
+                });
+            }else{
+                triggerDone(callback);
+            }
+        }
+        return this;
+    }
+
+
+    /**
+     * 改回调起作用会出现在task.execute()中发生异常时,会先调用Promise.reject(ex);
+     * @param callback
+     * @return
+     */
+    @Override
+    public Promise<Result, Progress> fail(final FailCallback callback) {
+        State state;
+        synchronized (this) {
+            state = mState;
+            if (state == State.STATE_PENDING) {
+                mCallbacks.mFailCallbacks.add(callback);
+            }
+        }
+
+        if (state == State.STATE_REJECTED) {
+            if (shouldExecuteInBackground(callback)) {
+                mNoAwex.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        //fail回调
+                        tryTrigger(callback, mException);
+                    }
+                });
+            } else {
+                triggerFail(callback);
+            }
+        }
+        return this;
+    }
+
+    @Override
+    public Promise<Result, Progress> progress(ProgressCallback<Progress> callback) {
+        synchronized (this) {
+            switch (mState) {
+                case STATE_PENDING:
+                    mCallbacks.mProgressCallbacks.add(callback);
+                    break;
+            }
+        }
+        return this;
+    }
+
+    @Override
+    public Promise<Result, Progress> always(final AlwaysCallback callback) {
+        State state;
+        synchronized (this) {
+            state = mState;
+            if (state == State.STATE_PENDING) {
+                mCallbacks.mAlwaysCallbacks.add(callback);
+            }
+        }
+        switch (state) {
+            case STATE_RESOLVED:
+            case STATE_REJECTED:
+                if (shouldExecuteInBackground(callback)) {
+                    mNoAwex.submit(new Runnable() {
+
+                        @Override
+                        public void run() {
+                            tryTrigger(callback);
+                        }
+                    });
+                } else {
+                    triggerAlways(callback);
+                }
+                break;
+        }
+        return this;
+    }
+
+    /**
+     * 它与cancelTask关联
+     * @param callback
+     * @return
+     */
+    @Override
+    public Promise<Result, Progress> cancel(final CancelCallback callback) {
+        State state;
+        synchronized (this) {
+            state = mState;
+            if (mState == State.STATE_PENDING) {
+                mCallbacks.mCancelCallbacks.add(callback);
+            }
+        }
+        if (state == State.STATE_CANCELLED) {
+            if (shouldExecuteInBackground(callback)) {
+                mNoAwex.submit(new Runnable() {
+
+                    @Override
+                    public void run() {
+                        tryTrigger(callback);
+                    }
+                });
+            } else {
+                triggerCancel(callback);
+            }
+        }
+        return this;
+    }
+
+
+    @Override
+    public <R, P> Promise<R, P> then(ThenCallback<Result, R, P> callback) {
+        return null;
+    }
+
+    @Override
+    public Promise<Result, Progress> pipe(Promise<Result, Progress> promise) {
+        return null;
+    }
+
+
     /**
      * task执行完后会调到这里,这里就是修改状态的关键步骤
      * @param result
@@ -99,9 +240,29 @@ public class NoAwexPromise<Result, Progress> implements ResolvablePromise<Result
         }
     }
 
+    /**
+     * 这里和fail搭配，它会优先于fail执行，目的就是让fail的状态正常
+     * @param ex
+     * @return
+     */
     @Override
     public Promise<Result, Progress> reject(Exception ex) {
-        return null;
+        List<FailCallback> failCallbacks;
+        List<AlwaysCallback> alwaysCallbacks;
+        synchronized (this){
+            validateInPendingState();
+            mState=State.STATE_REJECTED;//重置状态
+            Utils.printStateChanged(mLogger,mId,"REJECTED");
+            mException=ex;//从task执行发生异常出返回
+            failCallbacks=mCallbacks.cloneFailCallbacks();
+            alwaysCallbacks=mCallbacks.cloneAlwaysCallbacks();
+            clearCallbacks();
+        }
+        if(failCallbacks.size()>0||alwaysCallbacks.size()>0){
+            triggerAllFails(failCallbacks);
+            triggerAllAlways(alwaysCallbacks);
+        }
+        return this;
     }
 
     @Override
@@ -172,30 +333,6 @@ public class NoAwexPromise<Result, Progress> implements ResolvablePromise<Result
         return null;
     }
 
-    @Override
-    public Promise<Result, Progress> done(final DoneCallback<Result> callback) {
-        Log.e("State5",""+getState());
-        State state;
-        synchronized (this) {
-            state = mState;
-            if (state == State.STATE_PENDING) {
-                mCallbacks.mDoneCallbacks.add(callback);
-            }
-        }
-        if (state == State.STATE_RESOLVED) {
-            if (shouldExecuteInBackground(callback)) {
-                mNoAwex.submit(new Runnable() {
-                    @Override
-                    public void run() {
-                        tryTrigger(callback,mResult);
-                    }
-                });
-            }else{
-                triggerDone(callback);
-            }
-        }
-        return this;
-    }
 
     private void triggerDone(final DoneCallback<Result> callback) {
         if(callback instanceof UIDoneCallback && !mThreadHelper.isCurrentThread()){
@@ -218,50 +355,84 @@ public class NoAwexPromise<Result, Progress> implements ResolvablePromise<Result
         }
     }
 
+    private void tryTrigger(FailCallback callback, Exception exception) {
+        try {
+            callback.onFail(exception);
+        } catch (Exception ex) {
+            mLogger.e("Error when trigger fail callback", ex);
+        }
+    }
+
+    private void triggerAllFails(Collection<FailCallback> failCallbacks) {
+        for (final FailCallback callback : failCallbacks) {
+            triggerFail(callback);
+        }
+    }
+
+    private void triggerFail(final FailCallback callback) {
+        if (callback instanceof UIFailCallback && !mThreadHelper.isCurrentThread()) {
+            //主线程
+            mThreadHelper.post(new CancellableRunnable() {
+                @Override
+                public void execute() {
+                    tryTrigger(callback, mException);
+                }
+            });
+        } else {
+            tryTrigger(callback, mException);
+        }
+    }
+
 
     private boolean shouldExecuteInBackground(DoneCallback<Result> callback) {
         return mThreadHelper.isCurrentThread() && !(callback instanceof UIDoneCallback);
     }
 
-    @Override
-    public Promise<Result, Progress> fail(FailCallback callback) {
-        return null;
+    private boolean shouldExecuteInBackground(FailCallback callback) {
+        return mThreadHelper.isCurrentThread() && !(callback instanceof UIFailCallback);
     }
 
-    @Override
-    public Promise<Result, Progress> progress(ProgressCallback<Progress> callback) {
-        return null;
+    private boolean shouldExecuteInBackground(CancelCallback callback) {
+        return mThreadHelper.isCurrentThread() && !(callback instanceof UICancelCallback);
     }
 
-    @Override
-    public Promise<Result, Progress> always(AlwaysCallback callback) {
-        return null;
-    }
-
-    @Override
-    public Promise<Result, Progress> cancel(CancelCallback callback) {
-        return null;
+    private boolean shouldExecuteInBackground(AlwaysCallback callback) {
+        return mThreadHelper.isCurrentThread() && !(callback instanceof UIAlwaysCallback);
     }
 
 
-    @Override
-    public <R, P> Promise<R, P> then(ThenCallback<Result, R, P> callback) {
-        return null;
-    }
-
-    @Override
-    public Promise<Result, Progress> pipe(Promise<Result, Progress> promise) {
-        return null;
-    }
 
     @Override
     public void cancelTask() {
-
+        cancelTask(false);
     }
 
     @Override
-    public void cancelTask(boolean mayInterrupt) {
+    public void cancelTask(final boolean mayInterrupt) {
+        final State state;
+        final List<CancelCallback> cancelCallbacks;
+        synchronized (this) {
+            state = mState;
+            if (state == State.STATE_PENDING) {
+                mState = State.STATE_CANCELLED;
+                Utils.printStateChanged(mLogger, mId, "CANCELLED");
+            }
+            cancelCallbacks = mCallbacks.cloneCancelCallbacks();
+            clearCallbacks();
+        }
+        if (state == State.STATE_PENDING) {
+            if (mThreadHelper.isCurrentThread() && cancelCallbacks.size() > 0) {
+                mNoAwex.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        doCancel(mayInterrupt, cancelCallbacks);
+                    }
 
+                });
+            } else {
+                doCancel(mayInterrupt, cancelCallbacks);
+            }
+        }
     }
 
     private abstract class CancellableRunnable implements Runnable{
@@ -401,4 +572,43 @@ public class NoAwexPromise<Result, Progress> implements ResolvablePromise<Result
             mLogger.e("Error when trigger always callback", ex);
         }
     }
+
+    private void doCancel(boolean mayInterrupt, Collection<CancelCallback> cancelCallbacks) {
+        if (mTask != null) {
+            mNoAwex.cancel(mTask, mayInterrupt);
+        }
+        triggerAllCancel(cancelCallbacks);
+    }
+
+    private void triggerAllCancel(Collection<CancelCallback> cancelCallbacks) {
+        for (final CancelCallback callback : cancelCallbacks) {
+            triggerCancel(callback);
+        }
+    }
+
+
+    private void tryTrigger(CancelCallback callback) {
+        try {
+            callback.onCancel();
+        } catch (Exception ex) {
+            mLogger.e("Error when trigger always callback", ex);
+        }
+    }
+
+
+    private void triggerCancel(final CancelCallback callback) {
+        if (callback instanceof UICancelCallback && !mThreadHelper.isCurrentThread()) {
+            mThreadHelper.post(new Runnable() {
+                @Override
+                public void run() {
+                    tryTrigger(callback);
+                }
+            });
+        } else {
+            tryTrigger(callback);
+        }
+    }
+
+
 }
+
